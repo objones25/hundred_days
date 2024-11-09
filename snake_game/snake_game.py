@@ -1,10 +1,11 @@
 import pygame
 import random
 import sys
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from constants import Direction, GameState, GameSettings
 from theme import ThemeManager
-from snake_ai import SnakeAI
+from snake_ai import SnakeAI, AIDifficulty
+from high_score_system import HighScoreSystem
 
 class SnakeGame:
     def __init__(self):
@@ -27,6 +28,13 @@ class SnakeGame:
         self.ai_solver = None
         self.current_speed = self.settings.INITIAL_SPEED
         self.selected_menu_item = 0
+        self.ai_difficulty = AIDifficulty.MEDIUM
+        
+        # Initialize high score system
+        self.high_scores = HighScoreSystem()
+        self.player_name = "Player"  # Default name
+        self.input_active = False
+        self.name_input = ""
         
         self.reset_game()
 
@@ -100,15 +108,23 @@ class SnakeGame:
                 sys.exit()
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_1:
-                    self.ai_solver = SnakeAI(self, "a_star")
+                    self.ai_difficulty = AIDifficulty.EASY
+                    self.ai_solver = SnakeAI(self, self.ai_difficulty)
                     self.state = GameState.PLAYING
                     self.reset_game()
                 elif event.key == pygame.K_2:
-                    self.ai_solver = SnakeAI(self, "hamiltonian")
+                    self.ai_difficulty = AIDifficulty.MEDIUM
+                    self.ai_solver = SnakeAI(self, self.ai_difficulty)
                     self.state = GameState.PLAYING
                     self.reset_game()
                 elif event.key == pygame.K_3:
-                    self.ai_solver = SnakeAI(self, "greedy")
+                    self.ai_difficulty = AIDifficulty.HARD
+                    self.ai_solver = SnakeAI(self, self.ai_difficulty)
+                    self.state = GameState.PLAYING
+                    self.reset_game()
+                elif event.key == pygame.K_4:
+                    self.ai_difficulty = AIDifficulty.EXPERT
+                    self.ai_solver = SnakeAI(self, self.ai_difficulty)
                     self.state = GameState.PLAYING
                     self.reset_game()
                 elif event.key == pygame.K_ESCAPE:
@@ -159,15 +175,33 @@ class SnakeGame:
                 pygame.quit()
                 sys.exit()
             if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_RETURN:
-                    if self.selected_game_over_item == 0:  # Restart
-                        self.reset_game()
-                    elif self.selected_game_over_item == 1:  # Main Menu
-                        self.state = GameState.TITLE
-                elif event.key == pygame.K_UP:
-                    self.selected_game_over_item = (self.selected_game_over_item - 1) % 2
-                elif event.key == pygame.K_DOWN:
-                    self.selected_game_over_item = (self.selected_game_over_item + 1) % 2
+                if self.input_active:
+                    if event.key == pygame.K_RETURN:
+                        self.player_name = self.name_input if self.name_input else "Player"
+                        self.high_scores.add_score(
+                            self.player_name,
+                            self.score,
+                            self.ai_difficulty.value if self.ai_solver else "normal",
+                            bool(self.ai_solver)
+                        )
+                        self.input_active = False
+                    elif event.key == pygame.K_BACKSPACE:
+                        self.name_input = self.name_input[:-1]
+                    else:
+                        if len(self.name_input) < 10:  # Limit name length
+                            self.name_input += event.unicode
+                else:
+                    if event.key == pygame.K_RETURN:
+                        if self.selected_game_over_item == 0:  # Restart
+                            self.reset_game()
+                            self.state = GameState.PLAYING
+                        elif self.selected_game_over_item == 1:  # Main Menu
+                            self.state = GameState.TITLE
+                    elif event.key == pygame.K_UP:
+                        self.selected_game_over_item = (self.selected_game_over_item - 1) % 2
+                    elif event.key == pygame.K_DOWN:
+                        self.selected_game_over_item = (self.selected_game_over_item + 1) % 2
+
 
     def handle_input(self):
         if self.state == GameState.TITLE:
@@ -213,6 +247,14 @@ class SnakeGame:
             new_head in self.snake_pos[:-1]
         ):
             self.game_over = True
+            # Check if it's a high score
+            if self.high_scores.is_high_score(
+                self.score,
+                self.ai_difficulty.value if self.ai_solver else "normal",
+                not bool(self.ai_solver)
+            ):
+                self.input_active = True
+                self.name_input = ""
             return
             
         self.snake_pos.insert(0, new_head)
@@ -248,14 +290,15 @@ class SnakeGame:
     def draw_ai_menu(self):
         self.screen.fill(self.current_theme.bg_color)
         font = pygame.font.Font(None, 48)
-        title = font.render('Select AI Algorithm', True, self.current_theme.snake_color)
+        title = font.render('Select AI Difficulty', True, self.current_theme.snake_color)
         title_rect = title.get_rect(center=(self.settings.WINDOW_SIZE//2, 100))
         self.screen.blit(title, title_rect)
 
         menu_items = [
-            '1: A* Pathfinding',
-            '2: Hamiltonian Cycle',
-            '3: Greedy Algorithm',
+            '1: Easy - Basic pathfinding with mistakes',
+            '2: Medium - A* with occasional mistakes',
+            '3: Hard - Advanced A* with tail chasing',
+            '4: Expert - Optimal Hamiltonian paths',
             'ESC: Back to Menu'
         ]
         menu_font = pygame.font.Font(None, 36)
@@ -299,10 +342,12 @@ class SnakeGame:
         score_text = font.render(f'Score: {self.score}', True, self.current_theme.snake_color)
         self.screen.blit(score_text, (10, 10))
         
-        if self.game_over:
-            game_over_text = font.render('Game Over! Press R to Restart', True, self.current_theme.snake_color)
-            text_rect = game_over_text.get_rect(center=(self.settings.WINDOW_SIZE//2, self.settings.WINDOW_SIZE//2))
-            self.screen.blit(game_over_text, text_rect)
+        # Draw AI info if AI is active
+        if self.ai_solver:
+            ai_text = font.render(f'AI: {self.ai_difficulty.value}', True, self.current_theme.snake_color)
+            self.screen.blit(ai_text, (10, 40))
+            # Draw AI debug visualization
+            self.ai_solver.draw_debug_info(self.screen)
     
     def draw_pause_screen(self):
         # Add semi-transparent overlay
@@ -325,6 +370,7 @@ class SnakeGame:
             self.screen.blit(text, rect)
     
     def draw_game_over_screen(self):
+        # Add semi-transparent overlay
         overlay = pygame.Surface((self.settings.WINDOW_SIZE, self.settings.WINDOW_SIZE))
         overlay.set_alpha(128)
         overlay.fill((0, 0, 0))
@@ -340,13 +386,37 @@ class SnakeGame:
         score_rect = score_text.get_rect(center=(self.settings.WINDOW_SIZE//2, 180))
         self.screen.blit(score_text, score_rect)
 
-        menu_items = ['Restart', 'Main Menu']
-        menu_font = pygame.font.Font(None, 36)
-        for i, item in enumerate(menu_items):
-            color = self.current_theme.food_color if i == self.selected_game_over_item else self.current_theme.snake_color
-            text = menu_font.render(item, True, color)
-            rect = text.get_rect(center=(self.settings.WINDOW_SIZE//2, 250 + i * 50))
-            self.screen.blit(text, rect)
+        # Draw high scores
+        high_scores = self.high_scores.get_top_scores(limit=5)
+        if high_scores:
+            title_font = pygame.font.Font(None, 36)
+            title_text = title_font.render('High Scores:', True, self.current_theme.snake_color)
+            self.screen.blit(title_text, (self.settings.WINDOW_SIZE//4, 220))
+            
+            score_font = pygame.font.Font(None, 24)
+            for i, (name, score, diff, ai, date) in enumerate(high_scores):
+                score_text = score_font.render(
+                    f'{name}: {score} ({diff}{"[AI]" if ai else ""})',
+                    True, self.current_theme.snake_color
+                )
+                self.screen.blit(score_text, (self.settings.WINDOW_SIZE//4, 250 + i * 25))
+
+        # Name input if it's a high score
+        if self.input_active:
+            input_font = pygame.font.Font(None, 36)
+            prompt = input_font.render('Enter your name:', True, self.current_theme.snake_color)
+            self.screen.blit(prompt, (self.settings.WINDOW_SIZE//4, 400))
+            
+            name = input_font.render(self.name_input + '_', True, self.current_theme.food_color)
+            self.screen.blit(name, (self.settings.WINDOW_SIZE//4, 430))
+        else:
+            menu_items = ['Restart', 'Main Menu']
+            menu_font = pygame.font.Font(None, 36)
+            for i, item in enumerate(menu_items):
+                color = self.current_theme.food_color if i == self.selected_game_over_item else self.current_theme.snake_color
+                text = menu_font.render(item, True, color)
+                rect = text.get_rect(center=(self.settings.WINDOW_SIZE//2, 400 + i * 50))
+                self.screen.blit(text, rect)
 
     def draw(self):
         if self.state == GameState.TITLE:
