@@ -1,11 +1,14 @@
 import pygame
 import random
 import sys
-from typing import List, Tuple, Optional
-from constants import Direction, GameState, GameSettings
-from theme import ThemeManager
-from snake_ai import SnakeAI, AIDifficulty
-from high_score_system import HighScoreSystem
+from typing import Optional, Tuple, List
+from core.constants import Direction, GameState, GameSettings, AIType
+from core.theme import ThemeManager
+from ai.base import SnakeAI
+from enum import Enum
+from ai.reinforcement import RLAgent, RLConfig
+import numpy as np
+from utils.visualization import plot_training_stats
 
 class SnakeGame:
     def __init__(self):
@@ -25,20 +28,29 @@ class SnakeGame:
         self.state = GameState.TITLE
         self.selected_pause_item = 0
         self.selected_game_over_item = 0
-        self.ai_solver = None
-        self.current_speed = self.settings.INITIAL_SPEED
         self.selected_menu_item = 0
-        self.ai_difficulty = AIDifficulty.MEDIUM
+        self.current_speed = self.settings.INITIAL_SPEED
         
-        # Initialize high score system
-        self.high_scores = HighScoreSystem()
-        self.player_name = "Player"  # Default name
+        # AI related
+        self.ai_agent = None
+        self.ai_type = None
+        self.selected_ai_item = 0
+        self.config = RLConfig()
+        self.game_count = 0
+        self.record = 0
+        self.total_score = 0
+        self.scores = []
+        self.mean_scores = []
+        
+        # High score related
         self.input_active = False
         self.name_input = ""
+        self.player_name = "Player"
         
         self.reset_game()
 
-    def reset_game(self):
+    def reset_game(self) -> None:
+        """Reset the game state"""
         grid_count = self.settings.WINDOW_SIZE // self.settings.GRID_SIZE
         center = (grid_count // 2) * self.settings.GRID_SIZE
         self.snake_pos = [(center, center)]
@@ -46,8 +58,25 @@ class SnakeGame:
         self.food_pos = self.generate_food()
         self.score = 0
         self.game_over = False
+        self.prev_food_distance = float('inf')
+        if self.ai_agent:
+            self.game_count += 1
+            if self.score > self.record:
+                self.record = self.score
+                self.ai_agent.model.save()
+                
+            self.total_score += self.score
+            mean_score = self.total_score / self.game_count
+            
+            self.scores.append(self.score)
+            self.mean_scores.append(mean_score)
+            
+            # Train long memory
+            if self.game_count > 1:
+                self.ai_agent.train_long_memory()
 
     def generate_food(self) -> Tuple[int, int]:
+        """Generate new food position"""
         while True:
             x = random.randrange(0, self.settings.WINDOW_SIZE, self.settings.GRID_SIZE)
             y = random.randrange(0, self.settings.WINDOW_SIZE, self.settings.GRID_SIZE)
@@ -90,7 +119,7 @@ class SnakeGame:
                 elif event.key == pygame.K_r and self.game_over:
                     self.reset_game()
 
-        if not self.game_over and not self.ai_solver and self.state == GameState.PLAYING:
+        if not self.game_over and not self.ai_agent and self.state == GameState.PLAYING:
             keys = pygame.key.get_pressed()
             if keys[pygame.K_UP] and self.snake_direction != Direction.DOWN:
                 self.snake_direction = Direction.UP
@@ -107,24 +136,24 @@ class SnakeGame:
                 pygame.quit()
                 sys.exit()
             if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_1:
-                    self.ai_difficulty = AIDifficulty.EASY
-                    self.ai_solver = SnakeAI(self, self.ai_difficulty)
+                if event.key == pygame.K_1:  # Reinforcement Learning
+                    self.ai_type = AIType.REINFORCEMENT_LEARNING
+                    self.ai_agent = RLAgent(self)
                     self.state = GameState.PLAYING
                     self.reset_game()
-                elif event.key == pygame.K_2:
-                    self.ai_difficulty = AIDifficulty.MEDIUM
-                    self.ai_solver = SnakeAI(self, self.ai_difficulty)
+                elif event.key == pygame.K_2:  # A* Pathfinding
+                    self.ai_type = AIType.ASTAR
+                    # self.ai_agent = AStarAgent(self)  # To be implemented
                     self.state = GameState.PLAYING
                     self.reset_game()
-                elif event.key == pygame.K_3:
-                    self.ai_difficulty = AIDifficulty.HARD
-                    self.ai_solver = SnakeAI(self, self.ai_difficulty)
+                elif event.key == pygame.K_3:  # Hamiltonian
+                    self.ai_type = AIType.HAMILTONIAN
+                    # self.ai_agent = HamiltonianAgent(self)  # To be implemented
                     self.state = GameState.PLAYING
                     self.reset_game()
-                elif event.key == pygame.K_4:
-                    self.ai_difficulty = AIDifficulty.EXPERT
-                    self.ai_solver = SnakeAI(self, self.ai_difficulty)
+                elif event.key == pygame.K_4:  # Hybrid
+                    self.ai_type = AIType.HYBRID
+                    # self.ai_agent = HybridAgent(self)  # To be implemented
                     self.state = GameState.PLAYING
                     self.reset_game()
                 elif event.key == pygame.K_ESCAPE:
@@ -175,33 +204,16 @@ class SnakeGame:
                 pygame.quit()
                 sys.exit()
             if event.type == pygame.KEYDOWN:
-                if self.input_active:
-                    if event.key == pygame.K_RETURN:
-                        self.player_name = self.name_input if self.name_input else "Player"
-                        self.high_scores.add_score(
-                            self.player_name,
-                            self.score,
-                            self.ai_difficulty.value if self.ai_solver else "normal",
-                            bool(self.ai_solver)
-                        )
-                        self.input_active = False
-                    elif event.key == pygame.K_BACKSPACE:
-                        self.name_input = self.name_input[:-1]
-                    else:
-                        if len(self.name_input) < 10:  # Limit name length
-                            self.name_input += event.unicode
-                else:
-                    if event.key == pygame.K_RETURN:
-                        if self.selected_game_over_item == 0:  # Restart
-                            self.reset_game()
-                            self.state = GameState.PLAYING
-                        elif self.selected_game_over_item == 1:  # Main Menu
-                            self.state = GameState.TITLE
-                    elif event.key == pygame.K_UP:
-                        self.selected_game_over_item = (self.selected_game_over_item - 1) % 2
-                    elif event.key == pygame.K_DOWN:
-                        self.selected_game_over_item = (self.selected_game_over_item + 1) % 2
-
+                if event.key == pygame.K_RETURN:
+                    if self.selected_game_over_item == 0:  # Restart
+                        self.reset_game()
+                        self.state = GameState.PLAYING
+                    elif self.selected_game_over_item == 1:  # Main Menu
+                        self.state = GameState.TITLE
+                elif event.key == pygame.K_UP:
+                    self.selected_game_over_item = (self.selected_game_over_item - 1) % 2
+                elif event.key == pygame.K_DOWN:
+                    self.selected_game_over_item = (self.selected_game_over_item + 1) % 2
 
     def handle_input(self):
         if self.state == GameState.TITLE:
@@ -222,8 +234,8 @@ class SnakeGame:
             return
 
         # Get AI move if AI is enabled
-        if self.ai_solver:
-            next_direction = self.ai_solver.get_next_move()
+        if self.ai_agent:
+            next_direction = self.ai_agent.get_next_move()
             if next_direction:
                 self.snake_direction = next_direction
 
@@ -247,14 +259,6 @@ class SnakeGame:
             new_head in self.snake_pos[:-1]
         ):
             self.game_over = True
-            # Check if it's a high score
-            if self.high_scores.is_high_score(
-                self.score,
-                self.ai_difficulty.value if self.ai_solver else "normal",
-                not bool(self.ai_solver)
-            ):
-                self.input_active = True
-                self.name_input = ""
             return
             
         self.snake_pos.insert(0, new_head)
@@ -264,7 +268,7 @@ class SnakeGame:
             self.score += 1
             self.food_pos = self.generate_food()
             # Increase speed with score if not in AI mode
-            if not self.ai_solver:
+            if not self.ai_agent:
                 self.current_speed = min(
                     self.settings.MAX_SPEED,
                     self.settings.INITIAL_SPEED + self.score // 5
@@ -290,15 +294,15 @@ class SnakeGame:
     def draw_ai_menu(self):
         self.screen.fill(self.current_theme.bg_color)
         font = pygame.font.Font(None, 48)
-        title = font.render('Select AI Difficulty', True, self.current_theme.snake_color)
+        title = font.render('Select AI Type', True, self.current_theme.snake_color)
         title_rect = title.get_rect(center=(self.settings.WINDOW_SIZE//2, 100))
         self.screen.blit(title, title_rect)
 
         menu_items = [
-            '1: Easy - Basic pathfinding with mistakes',
-            '2: Medium - A* with occasional mistakes',
-            '3: Hard - Advanced A* with tail chasing',
-            '4: Expert - Optimal Hamiltonian paths',
+            '1: Reinforcement Learning - Deep Q-Learning',
+            '2: A* Pathfinding - Shortest Path',
+            '3: Hamiltonian Cycle - Complete Coverage',
+            '4: Hybrid AI - Combined Strategies',
             'ESC: Back to Menu'
         ]
         menu_font = pygame.font.Font(None, 36)
@@ -331,7 +335,7 @@ class SnakeGame:
         # Draw snake
         for segment in self.snake_pos:
             pygame.draw.rect(self.screen, self.current_theme.snake_color,
-                           (segment[0], segment[1], self.settings.GRID_SIZE, self.settings.GRID_SIZE))
+                        (segment[0], segment[1], self.settings.GRID_SIZE, self.settings.GRID_SIZE))
         
         # Draw food
         pygame.draw.rect(self.screen, self.current_theme.food_color,
@@ -342,12 +346,24 @@ class SnakeGame:
         score_text = font.render(f'Score: {self.score}', True, self.current_theme.snake_color)
         self.screen.blit(score_text, (10, 10))
         
-        # Draw AI info if AI is active
-        if self.ai_solver:
-            ai_text = font.render(f'AI: {self.ai_difficulty.value}', True, self.current_theme.snake_color)
-            self.screen.blit(ai_text, (10, 40))
-            # Draw AI debug visualization
-            self.ai_solver.draw_debug_info(self.screen)
+        # Draw AI info
+        if self.ai_agent:
+            if isinstance(self.ai_agent, RLAgent):
+                # Show RL specific info
+                ai_text = font.render(f'AI: {self.ai_type.value}', True, self.current_theme.snake_color)
+                self.screen.blit(ai_text, (10, 40))
+                
+                games_text = font.render(f'Games: {self.ai_agent.n_games}', True, self.current_theme.snake_color)
+                self.screen.blit(games_text, (10, 70))
+                
+                record_text = font.render(f'Record: {self.record}', True, self.current_theme.snake_color)
+                self.screen.blit(record_text, (10, 100))
+                
+                epsilon_text = font.render(f'ε: {self.ai_agent.epsilon:.3f}', True, self.current_theme.snake_color)
+                self.screen.blit(epsilon_text, (10, 130))
+                
+                # Draw AI debug visualization
+                self.ai_agent.draw_debug_info(self.screen)
     
     def draw_pause_screen(self):
         # Add semi-transparent overlay
@@ -435,10 +451,113 @@ class SnakeGame:
             self.draw_settings()
         
         pygame.display.flip()
+    
+    def ai_step(self) -> Tuple[float, bool, int]:
+        """Execute one step with AI agent"""
+        if not self.ai_agent:
+            return 0, False, 0
+            
+        # Get old state
+        state_old = self.ai_agent.get_state()
+        
+        # Get move
+        final_move = self.ai_agent.get_next_move()
+        
+        # Perform move and get new state
+        reward, done, score = self._move(final_move)
+        state_new = self.ai_agent.get_state()
+        
+        # Train short memory
+        self.ai_agent.train_short_memory(state_old, final_move, reward, state_new, done)
+        
+        # Remember
+        self.ai_agent.remember(state_old, final_move, reward, state_new, done)
+        
+        return reward, done, score
+
+    def calculate_reward(self, ate_food: bool, died: bool) -> float:
+        """Calculate reward for the current step"""
+        if died:
+            return self.config.REWARD_DEATH
+        if ate_food:
+            return self.config.REWARD_EAT
+            
+        # Calculate if snake got closer or further from food
+        head = self.snake_pos[0]
+        old_distance = self.prev_food_distance
+        new_distance = abs(head[0] - self.food_pos[0]) + abs(head[1] - self.food_pos[1])
+        self.prev_food_distance = new_distance
+        
+        if new_distance < old_distance:
+            return self.config.REWARD_CLOSER
+        return self.config.REWARD_FARTHER
+
+    def _move(self, action: List[int]) -> Tuple[float, bool, int]:
+        """Execute move and return (reward, done, score)"""
+        # Convert action to direction if needed
+        if self.ai_agent:
+            self.snake_direction = self.ai_agent._action_to_direction(action)
+        
+        # Get current head position
+        head_x, head_y = self.snake_pos[0]
+        
+        # Calculate new head position
+        if self.snake_direction == Direction.UP:
+            head_y -= self.settings.GRID_SIZE
+        elif self.snake_direction == Direction.DOWN:
+            head_y += self.settings.GRID_SIZE
+        elif self.snake_direction == Direction.LEFT:
+            head_x -= self.settings.GRID_SIZE
+        elif self.snake_direction == Direction.RIGHT:
+            head_x += self.settings.GRID_SIZE
+        
+        new_head = (head_x, head_y)
+        
+        # Check for collision/game over
+        done = (
+            head_x < 0 or 
+            head_x >= self.settings.WINDOW_SIZE or
+            head_y < 0 or 
+            head_y >= self.settings.WINDOW_SIZE or
+            new_head in self.snake_pos[:-1]
+        )
+        
+        if done:
+            self.game_over = True
+            return self.config.REWARD_DEATH, True, self.score
+        
+        # Update snake position
+        self.snake_pos.insert(0, new_head)
+        
+        # Check food collision
+        ate_food = new_head == self.food_pos
+        if ate_food:
+            self.score += 1
+            self.food_pos = self.generate_food()
+        else:
+            self.snake_pos.pop()
+        
+        # Calculate reward
+        reward = self.calculate_reward(ate_food, done)
+        
+        return reward, done, self.score
 
     def run(self):
         while True:
             self.handle_input()
-            self.update()
+            
+            if self.state == GameState.PLAYING:
+                if self.ai_agent and isinstance(self.ai_agent, RLAgent):
+                    # RL Agent gameplay
+                    reward, done, score = self.ai_step()
+                    if done:
+                        self.reset_game()
+                        # Update visualization if we have enough data
+                        if len(self.scores) > 2:
+                            plot_training_stats(self.scores, self.mean_scores)
+                else:
+                    # Normal gameplay or other AI types
+                    self.update()
+                    
             self.draw()
             self.clock.tick(self.current_speed)
