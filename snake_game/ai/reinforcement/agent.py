@@ -13,22 +13,29 @@ from ..base import SnakeAI
 from .model import SnakeNN
 from .config import RLConfig
 from .trainer import QTrainer
-from .memory import ReplayMemory
+from .memory import PrioritizedReplayMemory
+from utils.persistence import SaveLoadManager
 
 class RLAgent(SnakeAI):
-    """Reinforcement Learning agent using Deep Q-Learning"""
-    
     def __init__(self, game):
         super().__init__(game)
         self.config = RLConfig()
         self.n_games = 0
         self.epsilon = self.config.EPSILON_START
-        self.memory = ReplayMemory(self.config.MAX_MEMORY)
+        
+        # Initialize model and trainer
         self.model = SnakeNN(input_size=11, hidden_size=256, output_size=3)
         self.trainer = QTrainer(
             self.model,
             learning_rate=self.config.LEARNING_RATE,
             gamma=self.config.GAMMA
+        )
+        
+        # Initialize prioritized replay memory
+        self.memory = PrioritizedReplayMemory(
+            capacity=self.config.MAX_MEMORY,
+            alpha=0.6,
+            beta_start=0.4
         )
         
         # Training metrics
@@ -40,28 +47,39 @@ class RLAgent(SnakeAI):
             'mean_scores': [],
             'epsilons': [],
             'memory_size': [],
-            'rewards': []
+            'rewards': [],
+            'memory_utilization': [],
+            'avg_priorities': []
         }
         self.current_reward = 0
         self.record = 0
         
-        # Load previous training data if it exists
-        self.load_training_stats()
+        # Initialize save/load manager
+        self.save_load_manager = SaveLoadManager(max_saves=5)
+        
+        # Load previous training state if available
+        self.load_training_state()
 
-    def get_next_move(self) -> List[int]:
-        """Get the next action based on current state"""
+    def get_next_move(self) -> Direction:
+        """Get the next move based on current state"""
         state = self.get_state()
-        return self._get_action(state)
+        action = self._get_action(state)
+        return self._action_to_direction(action)
 
     def remember(self, state: List[bool], action: List[int], reward: float, 
                 next_state: List[bool], done: bool) -> None:
-        """Store experience in memory"""
+        """Store experience in memory with memory management"""
         self.memory.push(state, action, reward, next_state, done)
         self.current_reward += reward
         
-        if self.config.DEBUG:
-            self.config.logger.debug(f"Stored experience - Memory size: {len(self.memory)}")
-            self.config.logger.debug(f"Action: {action}, Reward: {reward}, Done: {done}")
+        # Log memory stats periodically
+        if len(self.memory) % 1000 == 0:  # Adjust logging frequency as needed
+            stats = self.memory.get_stats()
+            self.config.logger.debug(
+                f"Memory stats - Size: {stats['size']}, "
+                f"Capacity: {stats['capacity']}, "
+                f"Utilization: {stats['utilization']:.1f}%"
+            )
 
     def train_short_memory(self, state, action, reward, next_state, done):
         """Train the agent on a single step"""
@@ -77,27 +95,56 @@ class RLAgent(SnakeAI):
             self.config.logger.debug("Completed short memory training step")
 
     def train_long_memory(self):
-        """Train on a batch of experiences"""
+        """Train on a batch of experiences using prioritized replay"""
         if len(self.memory) < self.config.BATCH_SIZE:
-            if self.config.DEBUG:
-                self.config.logger.debug(f"Skipping long memory training - insufficient memories: {len(self.memory)}/{self.config.BATCH_SIZE}")
             return
             
-        states, actions, rewards, next_states, dones = self.memory.sample(self.config.BATCH_SIZE)
+        # Sample batch with priorities and importance sampling weights
+        states, actions, rewards, next_states, dones, indices, weights = self.memory.sample(self.config.BATCH_SIZE)
         
-        self.trainer.train_step(
-            torch.FloatTensor(states),
-            torch.FloatTensor(actions),
-            torch.FloatTensor(rewards),
-            torch.FloatTensor(next_states),
-            torch.BoolTensor(dones)
-        )
+        # Convert to tensors
+        states = torch.FloatTensor(states)
+        next_states = torch.FloatTensor(next_states)
+        actions = torch.FloatTensor(actions)
+        rewards = torch.FloatTensor(rewards)
+        dones = torch.BoolTensor(dones)
+        weights = torch.FloatTensor(weights)
         
-        if self.config.DEBUG:
-            self.config.logger.debug(f"Completed long memory training with batch size: {self.config.BATCH_SIZE}")
+        # Calculate TD errors
+        current_q_values = self.model(states)
+        next_q_values = self.model(next_states)
+        target_q_values = current_q_values.clone()
+        
+        for idx in range(len(dones)):
+            Q_new = rewards[idx]
+            if not dones[idx]:
+                Q_new = rewards[idx] + self.config.GAMMA * torch.max(next_q_values[idx])
+            target_q_values[idx][torch.argmax(actions[idx]).item()] = Q_new
+        
+        # Calculate loss with importance sampling weights
+        td_errors = torch.abs(target_q_values - current_q_values).mean(dim=1).detach().numpy()
+        
+        # Update priorities in memory
+        self.memory.update_priorities(indices, td_errors)
+        
+        # Train with weighted loss
+        self.trainer.train_step(states, actions, rewards, next_states, dones, weights)
     
     def update_training_stats(self, score: int):
-        """Update and save training statistics"""
+        """Update training statistics with enhanced memory metrics"""
+        super().update_training_stats(score)
+        
+        # Add memory-specific stats
+        memory_stats = self.memory.get_stats()
+        self.training_stats['memory_utilization'].append(memory_stats['utilization'])
+        self.training_stats['avg_priorities'].append(memory_stats['avg_priority'])
+        
+        # Save state periodically
+        if self.n_games % 100 == 0:  # Adjust saving frequency as needed
+            self.save_training_state()
+
+    def update_training_stats(self, score: int):
+        """Update training statistics with enhanced memory metrics"""
         self.n_games += 1
         self.scores.append(score)
         mean_score = sum(self.scores) / len(self.scores)
@@ -107,13 +154,18 @@ class RLAgent(SnakeAI):
             self.record = score
             self.model.save(f'model_record_{score}.pth')
         
+        # Get memory stats
+        memory_stats = self.memory.get_stats()
+        
         # Update training stats
         self.training_stats['episodes'].append(self.n_games)
         self.training_stats['scores'].append(score)
         self.training_stats['mean_scores'].append(mean_score)
         self.training_stats['epsilons'].append(self.epsilon)
-        self.training_stats['memory_size'].append(len(self.memory))
+        self.training_stats['memory_size'].append(memory_stats['size'])
         self.training_stats['rewards'].append(self.current_reward)
+        self.training_stats['memory_utilization'].append(memory_stats['utilization'])
+        self.training_stats['avg_priorities'].append(memory_stats['avg_priority'])
         
         # Reset current reward for next episode
         self.current_reward = 0
@@ -122,34 +174,22 @@ class RLAgent(SnakeAI):
         if self.n_games % self.config.LOG_INTERVAL == 0:
             self.config.logger.info(
                 f"Game {self.n_games}, Score {score}, Record {self.record}, "
-                f"Epsilon {self.epsilon:.3f}, Memory {len(self.memory)}"
+                f"Epsilon {self.epsilon:.3f}, Memory {memory_stats['size']}/{memory_stats['capacity']} "
+                f"({memory_stats['utilization']:.1f}% full)"
             )
-            self.save_training_stats()
-    
-    def save_training_stats(self):
-        """Save training statistics to file"""
-        stats_dir = 'training_stats'
-        if not os.path.exists(stats_dir):
-            os.makedirs(stats_dir)
+            self.save_training_state()
             
-        filename = os.path.join(stats_dir, 'training_stats.json')
-        with open(filename, 'w') as f:
-            json.dump(self.training_stats, f)
+    def save_training_state(self, force=False):
+        """Save current training state"""
+        self.save_load_manager.save_state(self, force)
     
-    def load_training_stats(self):
-        """Load training statistics from file"""
-        filename = os.path.join('training_stats', 'training_stats.json')
-        if os.path.exists(filename):
-            with open(filename, 'r') as f:
-                self.training_stats = json.load(f)
-                
-            # Restore the latest game count and record
-            if self.training_stats['episodes']:
-                self.n_games = self.training_stats['episodes'][-1]
-                self.record = max(self.training_stats['scores'])
-                
-                if self.config.DEBUG:
-                    self.config.logger.info(f"Loaded previous training stats - Games: {self.n_games}, Record: {self.record}")
+    def load_training_state(self):
+        """Load most recent training state"""
+        return self.save_load_manager.load_latest_state(self)
+    
+    def load_best_model(self):
+        """Load the best performing model"""
+        return self.save_load_manager.load_best_model(self)
 
     def _get_action(self, state: List[bool]) -> List[int]:
         """Choose action using epsilon-greedy strategy"""

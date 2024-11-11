@@ -9,6 +9,14 @@ from enum import Enum
 from ai.reinforcement import RLAgent, RLConfig
 import numpy as np
 from utils.visualization import plot_training_stats
+import multiprocessing as mp
+from concurrent.futures import ThreadPoolExecutor
+import threading
+from queue import Queue
+import matplotlib.pyplot as plt
+from ai.pathfinding.astar import AStarPathfinder
+from ai.pathfinding.hamilton import HamiltonianPathfinder
+from ai.pathfinding.hybrid import HybridPathfinder
 
 class SnakeGame:
     def __init__(self):
@@ -22,7 +30,7 @@ class SnakeGame:
         
         # Initialize themes
         self.themes = ThemeManager.get_themes()
-        self.current_theme = self.themes["classic"]
+        self.current_theme = self.themes.get("classic", ThemeManager.get_default_theme())
         
         # Game state
         self.state = GameState.TITLE
@@ -31,23 +39,26 @@ class SnakeGame:
         self.selected_menu_item = 0
         self.current_speed = self.settings.INITIAL_SPEED
         
+        # Game variables
+        self.score = 0
+        self.game_over = False
+        self.prev_food_distance = float('inf')
+        
         # AI related
         self.ai_agent = None
         self.ai_type = None
         self.selected_ai_item = 0
-        self.config = RLConfig()
         self.game_count = 0
         self.record = 0
         self.total_score = 0
         self.scores = []
         self.mean_scores = []
+        self.config = RLConfig()  # Add this line
         
-        # High score related
-        self.input_active = False
-        self.name_input = ""
-        self.player_name = "Player"
-        
+        # Initialize game state
         self.reset_game()
+        
+        print("Game initialized successfully")  # Debug print
 
     def reset_game(self) -> None:
         """Reset the game state"""
@@ -59,20 +70,22 @@ class SnakeGame:
         self.score = 0
         self.game_over = False
         self.prev_food_distance = float('inf')
+        
         if self.ai_agent:
             self.game_count += 1
             if self.score > self.record:
                 self.record = self.score
-                self.ai_agent.model.save()
+                if hasattr(self.ai_agent, 'model'):
+                    self.ai_agent.model.save()
                 
             self.total_score += self.score
-            mean_score = self.total_score / self.game_count
+            mean_score = self.total_score / self.game_count if self.game_count > 0 else 0
             
             self.scores.append(self.score)
             self.mean_scores.append(mean_score)
             
             # Train long memory
-            if self.game_count > 1:
+            if hasattr(self.ai_agent, 'train_long_memory') and self.game_count > 1:
                 self.ai_agent.train_long_memory()
 
     def generate_food(self) -> Tuple[int, int]:
@@ -143,21 +156,67 @@ class SnakeGame:
                     self.reset_game()
                 elif event.key == pygame.K_2:  # A* Pathfinding
                     self.ai_type = AIType.ASTAR
-                    # self.ai_agent = AStarAgent(self)  # To be implemented
+                    self.ai_agent = AStarPathfinder(self)
                     self.state = GameState.PLAYING
                     self.reset_game()
-                elif event.key == pygame.K_3:  # Hamiltonian
+                elif event.key == pygame.K_3:  # Hamiltonian Cycle
                     self.ai_type = AIType.HAMILTONIAN
-                    # self.ai_agent = HamiltonianAgent(self)  # To be implemented
+                    self.ai_agent = HamiltonianPathfinder(self)
                     self.state = GameState.PLAYING
                     self.reset_game()
                 elif event.key == pygame.K_4:  # Hybrid
                     self.ai_type = AIType.HYBRID
-                    # self.ai_agent = HybridAgent(self)  # To be implemented
+                    self.ai_agent = HybridPathfinder(self)
                     self.state = GameState.PLAYING
                     self.reset_game()
                 elif event.key == pygame.K_ESCAPE:
                     self.state = GameState.TITLE
+
+def draw_ai_menu(self):
+    self.screen.fill(self.current_theme.bg_color)
+    font = pygame.font.Font(None, 48)
+    title = font.render('Select AI Type', True, self.current_theme.snake_color)
+    title_rect = title.get_rect(center=(self.settings.WINDOW_SIZE//2, 100))
+    self.screen.blit(title, title_rect)
+
+    # Updated menu items with more descriptive text
+    menu_items = [
+        ('1: Reinforcement Learning', 'Self-learning AI using Deep Q-Network'),
+        ('2: A* Pathfinding', 'Finds optimal path to food'),
+        ('3: Hamiltonian Cycle', 'Never fails but slower'),
+        ('4: Hybrid AI', 'Combines A* and Hamiltonian strategies'),
+        ('ESC: Back to Menu', '')
+    ]
+    
+    menu_font = pygame.font.Font(None, 36)
+    desc_font = pygame.font.Font(None, 24)
+    y_pos = 200
+    
+    for item, desc in menu_items:
+        # Draw main menu item
+        text = menu_font.render(item, True, self.current_theme.snake_color)
+        rect = text.get_rect(center=(self.settings.WINDOW_SIZE//2, y_pos))
+        self.screen.blit(text, rect)
+        
+        # Draw description if it exists
+        if desc:
+            desc_text = desc_font.render(desc, True, self.current_theme.snake_color)
+            desc_rect = desc_text.get_rect(center=(self.settings.WINDOW_SIZE//2, y_pos + 25))
+            self.screen.blit(desc_text, desc_rect)
+        
+        y_pos += 70  # Increased spacing to accommodate descriptions
+
+def draw_game_screen(self):
+    # ... existing code ...
+    
+    # Update AI info display for different AI types
+    if self.ai_agent:
+        font = pygame.font.Font(None, 36)
+        ai_text = font.render(f'AI: {self.ai_type.value}', True, self.current_theme.snake_color)
+        self.screen.blit(ai_text, (10, 40))
+        
+        if hasattr(self.ai_agent, 'draw_debug_info'):
+            self.ai_agent.draw_debug_info(self.screen)
 
     def handle_pause_input(self):
         for event in pygame.event.get():
@@ -541,23 +600,128 @@ class SnakeGame:
         reward = self.calculate_reward(ate_food, done)
         
         return reward, done, self.score
+    
+    def create_parallel_games(self):
+        """Create multiple game instances for parallel training"""
+        self.parallel_games = []
+        for _ in range(self.num_parallel_games):
+            game = SnakeGame()
+            game.ai_agent = self.ai_agent.__class__(game)  # Create new AI agent instance
+            game.ai_agent.model = self.ai_agent.model  # Share the same model
+            self.parallel_games.append(game)
+    
+    def process_parallel_game(self, game_index: int) -> Tuple[int, float, bool, int]:
+        """Process one step of a parallel game"""
+        game = self.parallel_games[game_index]
+        if not game.game_over:
+            reward, done, score = game.ai_step()
+            return game_index, reward, done, score
+        return game_index, 0, True, game.score
+    
+    def update_parallel_games(self):
+        """Update all parallel games"""
+        results = []
+        with ThreadPoolExecutor(max_workers=self.num_parallel_games) as executor:
+            futures = [executor.submit(self.process_parallel_game, i) 
+                      for i in range(self.num_parallel_games)]
+            for future in futures:
+                results.append(future.result())
+        
+        # Process results
+        for game_index, reward, done, score in results:
+            if done:
+                # Update stats and reset the game
+                self.parallel_games[game_index].ai_agent.update_training_stats(score)
+                self.parallel_games[game_index].reset_game()
+                
+                # Put result in queue for visualization
+                self.game_results_queue.put({
+                    'game_index': game_index,
+                    'score': score,
+                    'total_games': self.ai_agent.n_games
+                })
 
     def run(self):
+        """Main game loop with visualization"""
+        # Initialize plotting
+        plt.ion()  # Turn on interactive mode
+        training_plots_initialized = False
+        
         while True:
             self.handle_input()
             
             if self.state == GameState.PLAYING:
                 if self.ai_agent and isinstance(self.ai_agent, RLAgent):
-                    # RL Agent gameplay
-                    reward, done, score = self.ai_step()
-                    if done:
-                        self.reset_game()
-                        # Update visualization if we have enough data
-                        if len(self.scores) > 2:
-                            plot_training_stats(self.scores, self.mean_scores)
+                    try:
+                        # Get old state
+                        state_old = self.ai_agent.get_state()
+                        
+                        # Get move
+                        action = self.ai_agent._get_action(state_old)
+                        
+                        # Perform move and get new state
+                        reward, done, score = self._move(action)
+                        state_new = self.ai_agent.get_state()
+                        
+                        # Train short memory
+                        self.ai_agent.train_short_memory(state_old, action, reward, state_new, done)
+                        
+                        # Remember
+                        self.ai_agent.remember(state_old, action, reward, state_new, done)
+                        
+                        if done:
+                            # Update training stats
+                            self.ai_agent.update_training_stats(score)
+                            
+                            # Update visualization every N games to improve performance
+                            if self.ai_agent.n_games % 5 == 0:  # Adjust this number as needed
+                                try:
+                                    plot_training_stats(
+                                        self.ai_agent.scores,
+                                        self.ai_agent.mean_scores,
+                                        self.ai_agent.training_stats
+                                    )
+                                except Exception as viz_error:
+                                    print(f"Visualization error: {viz_error}")
+                            
+                            self.reset_game()
+                    except Exception as e:
+                        print(f"Error in AI loop: {str(e)}")
+                        raise e
                 else:
-                    # Normal gameplay or other AI types
                     self.update()
+                
+                # Draw game state
+                self.screen.fill(self.current_theme.bg_color)
+                
+                # Draw snake
+                for segment in self.snake_pos:
+                    pygame.draw.rect(self.screen, self.current_theme.snake_color,
+                                (segment[0], segment[1], self.settings.GRID_SIZE, self.settings.GRID_SIZE))
+                
+                # Draw food
+                pygame.draw.rect(self.screen, self.current_theme.food_color,
+                            (self.food_pos[0], self.food_pos[1], self.settings.GRID_SIZE, self.settings.GRID_SIZE))
+                
+                # Draw enhanced stats display
+                font = pygame.font.Font(None, 24)
+                if self.ai_agent and isinstance(self.ai_agent, RLAgent):
+                    stats = [
+                        f'ε: {self.ai_agent.epsilon:.3f}',
+                        f'Games: {self.ai_agent.n_games}',
+                        f'Record: {self.ai_agent.record}',
+                        f'Memory: {len(self.ai_agent.memory)}/{self.ai_agent.config.MAX_MEMORY}',
+                        f'Batch: {self.ai_agent.config.BATCH_SIZE}',
+                        f'Current Reward: {self.ai_agent.current_reward:.1f}',
+                        f'Score: {self.score}'
+                    ]
                     
-            self.draw()
-            self.clock.tick(self.current_speed)
+                    for i, stat in enumerate(stats):
+                        text = font.render(stat, True, self.current_theme.snake_color)
+                        self.screen.blit(text, (10, 10 + i * 20))
+            else:
+                self.draw()
+            
+            pygame.display.flip()
+            # Adjust speed based on whether we're training
+            self.clock.tick(60 if self.ai_agent else self.current_speed)

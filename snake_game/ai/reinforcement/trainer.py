@@ -12,36 +12,37 @@ class QTrainer:
         self.optimizer = optim.Adam(model.parameters(), lr=self.lr)
         self.criterion = nn.MSELoss()
 
-    def train_step(self, state: List[bool], action: List[int], reward: float, 
-                  next_state: List[bool], done: bool) -> None:
-        # Convert to tensors
-        state = torch.FloatTensor(np.array(state))
-        next_state = torch.FloatTensor(np.array(next_state))
-        action = torch.FloatTensor(np.array(action))
+    def train_step(self, state: torch.Tensor, action: torch.Tensor, 
+                  reward: torch.Tensor, next_state: torch.Tensor, done: torch.Tensor,
+                  weights: torch.Tensor = None):
+        """
+        Train the model with optional importance sampling weights
         
-        if len(state.shape) == 1:  # Single sample
-            state = state.unsqueeze(0)
-            next_state = next_state.unsqueeze(0)
-            action = action.unsqueeze(0)
-            reward = torch.FloatTensor([reward])
-            done = (done,)
-        else:  # Multiple samples
-            reward = torch.FloatTensor(reward)
-
-        # Predicted Q values with current state
+        Args:
+            state: Current state
+            action: Action taken
+            reward: Reward received
+            next_state: Next state
+            done: Whether episode ended
+            weights: Optional importance sampling weights for prioritized replay
+        """
+        # Get predicted Q values for current state
         pred = self.model(state)
 
-        # Q_new = reward + gamma * max(Q(next_state)) -> only do this if not done
+        # Calculate target Q values
         target = pred.clone()
         for idx in range(len(done)):
             Q_new = reward[idx]
             if not done[idx]:
-                Q_new = reward[idx] + self.gamma * torch.max(
-                    self.model(next_state[idx].unsqueeze(0)))
-            target[idx][torch.argmax(action[idx]).item()] = Q_new
+                Q_new = reward[idx] + self.gamma * torch.max(self.model(next_state[idx]))
+            target[idx][torch.argmax(action[idx])] = Q_new
 
-        # Train
+        # Calculate weighted loss if weights provided
         self.optimizer.zero_grad()
-        loss = self.criterion(target, pred)
+        if weights is not None:
+            loss = (weights * self.criterion(target, pred)).mean()
+        else:
+            loss = self.criterion(target, pred)
+            
         loss.backward()
         self.optimizer.step()
