@@ -1,6 +1,6 @@
 # ai/pathfinding/__init__.py
-from .astar import AStarAgent
-from .hamilton import HamiltonianAgent
-from .hybrid import HybridAgent
+from .astar import AStarPathfinder
+from .hamilton import HamiltonianPathfinder
+from .hybrid import HybridPathfinder
 
-__all__ = ['AStarAgent', 'HamiltonianAgent', 'HybridAgent']
+__all__ = ['AStarPathfinder', 'HamiltonianPathfinder', 'HybridPathfinder']
