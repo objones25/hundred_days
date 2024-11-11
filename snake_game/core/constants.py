@@ -22,3 +22,9 @@ class GameSettings:
     INITIAL_SPEED: int = 10
     MAX_SPEED: int = 20
     MIN_SPEED: int = 5
+
+class AIType(Enum):
+    REINFORCEMENT_LEARNING = "Reinforcement Learning"
+    ASTAR = "A* Pathfinding"
+    HAMILTONIAN = "Hamiltonian Cycle"
+    HYBRID = "Hybrid AI"

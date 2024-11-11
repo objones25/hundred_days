@@ -1,18 +1,20 @@
+# main.py
 import pygame
 import sys
-from snake_game import SnakeGame
+from core.game import SnakeGame
+from core.constants import GameState
+from utils.logger import setup_logger
 
 def main():
+    logger = setup_logger()
     try:
         game = SnakeGame()
+        # Call the run method to start the game loop
         game.run()
     except Exception as e:
-        print(f"An error occurred: {e}")
+        logger.error(f"An error occurred: {e}")
         pygame.quit()
         sys.exit(1)
-    finally:
-        pygame.quit()
-        sys.exit(0)
 
 if __name__ == "__main__":
     main()
